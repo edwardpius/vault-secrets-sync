@@ -1,0 +1,94 @@
+# Vault -> AWS Secrets Manager sync: test, build, plan on every MR, apply on protected main.
+# No stored credentials: jobs sign in to AWS and Vault with GitLab.com OIDC id_tokens, and
+# nothing Terraform manages here contains a secret value.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages: [test, build, plan, apply]
+
+variables:
+  TG_NON_INTERACTIVE: "true"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  UV_IMAGE: ghcr.io/astral-sh/uv:0.10.2-python3.13-bookworm-slim
+  # Image with Terraform >= 1.10, Terragrunt >= 1.0 and git. Pin by digest.
+  TG_IMAGE: registry.gitlab.com/CHANGE-ME/terragrunt-runner@sha256:CHANGE-ME
+
+test:lambda:
+  stage: test
+  image: $UV_IMAGE
+  variables:
+    UV_CACHE_DIR: $CI_PROJECT_DIR/.uv-cache
+  cache:
+    key: uv
+    paths: [.uv-cache]
+  script:
+    - cd lambda
+    - uv run --frozen pytest -q
+
+test:terraform-fmt:
+  stage: test
+  image: $TG_IMAGE
+  script:
+    - terraform fmt -check -recursive modules
+    - terragrunt hcl fmt --check
+
+build:lambda:
+  stage: build
+  image: $UV_IMAGE
+  needs: [test:lambda]
+  script:
+    - ./scripts/build_lambda.sh
+  artifacts:
+    paths: [dist/vault-secrets-sync.zip]
+    expire_in: 1 week
+
+.terragrunt:
+  image: $TG_IMAGE
+  # A self-managed runner that can reach HCP Vault (HVN peering/TGW, or a fixed egress IP on the
+  # cluster's ip_allowlist). GitLab.com shared runners have no stable IPs.
+  tags: [vault-network]
+  needs: [build:lambda]
+  id_tokens:
+    TF_AWS_WEB_IDENTITY_TOKEN: # read by the AWS provider (assume_role_with_web_identity)
+      aud: sts.amazonaws.com
+    TERRAFORM_VAULT_AUTH_JWT: # read by the Vault provider (auth_login_jwt)
+      aud: https://CHANGE-ME.vault.xxxx.aws.hashicorp.cloud:8200 # = vault_addr in live/common.hcl
+  before_script:
+    - cd live
+
+plan:mr:
+  extends: .terragrunt
+  stage: plan
+  variables:
+    TG_AWS_ROLE_SUFFIX: plan # read-only AWS role trusted for any branch
+    TG_VAULT_ROLE: vault-secrets-sync-plan # read-only Vault role
+  script:
+    - terragrunt run --all plan
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+plan:main:
+  extends: .terragrunt
+  stage: plan
+  resource_group: vault-secrets-sync
+  script:
+    - terragrunt run --all plan
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+apply:
+  extends: .terragrunt
+  stage: apply
+  needs: [build:lambda, plan:main]
+  resource_group: vault-secrets-sync
+  environment:
+    name: vault-secrets-sync-prod # protected environment with required approvals
+  script:
+    - terragrunt run --all apply
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual

@@ -1,0 +1,48 @@
+# One sync run, step by step.
+# Render: d2 docs/diagrams/sync-run.d2 docs/diagrams/sync-run.svg
+
+vars: {
+  d2-config: {
+    theme-id: 0
+    pad: 40
+  }
+}
+
+title: |md
+  # One sync run (every minute)
+| {near: top-center}
+
+run: "" {
+  shape: sequence_diagram
+  style.font-size: 18
+
+  sched: EventBridge Scheduler
+  lambda: Lambda vault-secrets-sync
+  sts: AWS STS (hub)
+  vault: HCP Vault
+  role: Destination role (STS)
+  sm: Secrets Manager (destination)
+
+  sched -> lambda: invoke
+  lambda -> sts: "GetWebIdentityToken(aud, RS256, 300 s)"
+  sts -> lambda: signed JWT {style.stroke-dash: 4}
+  lambda -> vault: "login auth/aws-sts (namespace admin)"
+  vault -> lambda: "Vault token, 5-minute TTL" {style.stroke-dash: 4}
+
+  read: Read every configured secret {
+    lambda -> vault: "GET <mount>/data/<path> (X-Vault-Namespace)"
+    vault -> lambda: "data + version (read failure: never delete)" {style.stroke-dash: 4}
+  }
+
+  dest: For each destination account {
+    lambda -> role: "AssumeRole vault-secrets-sync (15 min)"
+    role -> lambda: temporary credentials {style.stroke-dash: 4}
+    lambda -> sm: "ListSecrets (managed-by tag)"
+    lambda -> sm: "missing: CreateSecret + tags"
+    lambda -> sm: "vault-version changed: PutSecretValue + tag"
+    lambda -> sm: "no longer configured: DeleteSecret (7-day recovery)"
+  }
+
+  lambda -> vault: revoke-self
+  lambda -> sched: "summary (errors raise, so the alarm fires)" {style.stroke-dash: 4}
+}

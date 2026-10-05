@@ -1,0 +1,9 @@
+.terragrunt-cache/
+.terraform/
+*.tfstate*
+.build/
+dist/
+__pycache__/
+.venv/
+.uv-cache/
+.pytest_cache/

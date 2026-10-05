@@ -1,0 +1,20 @@
+{
+  "destinations": {
+    "prod-use1": { "account_id": "222222222222", "region": "us-east-1" },
+    "nonprod-use1": { "account_id": "333333333333", "region": "us-east-1" }
+  },
+  "sources": [
+    {
+      "namespace": "admin",
+      "mount": "app-kv",
+      "secrets": ["sync-canary/ping", "payments/db"],
+      "destinations": ["prod-use1"]
+    },
+    {
+      "namespace": "admin/team-a",
+      "mount": "kv",
+      "secrets": ["api/stripe"],
+      "destinations": ["prod-use1", "nonprod-use1"]
+    }
+  ]
+}

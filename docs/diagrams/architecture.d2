@@ -1,0 +1,133 @@
+# Vault -> AWS Secrets Manager sync: components, trust and run order.
+# Render: d2 docs/diagrams/architecture.d2 docs/diagrams/architecture.svg  (dagre layout, top-down)
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    theme-id: 0
+    pad: 48
+  }
+}
+
+classes: {
+  zone: {
+    style: {
+      fill: "#F6F6F3"
+      stroke: "#B8B8B0"
+      border-radius: 12
+      font-size: 24
+      bold: true
+    }
+  }
+  comp: {
+    shape: rectangle
+    width: 400
+    style: {
+      fill: "#FFFFFF"
+      stroke: "#5B5B57"
+      stroke-width: 2
+      border-radius: 8
+      font-size: 20
+    }
+  }
+  key: {
+    shape: rectangle
+    width: 400
+    style: {
+      fill: "#E8F0FE"
+      stroke: "#1A56DB"
+      stroke-width: 3
+      border-radius: 8
+      font-size: 20
+    }
+  }
+  data: {
+    style: {
+      stroke: "#1A56DB"
+      stroke-width: 3
+      font-size: 20
+      font-color: "#173A8F"
+      bold: true
+    }
+  }
+}
+
+title: |md
+  # Vault → AWS Secrets Manager sync
+  AWS proves its identity to Vault. No IAM users, access keys or static tokens anywhere.
+| {near: top-center}
+
+direction: down
+
+vault: HCP Vault Dedicated {
+  class: zone
+  direction: down
+  kv: |md
+    **KV v2 secrets**\
+    `admin` + child namespaces\
+    read policy lists exact paths
+  | {class: comp}
+  jwt: |md
+    **JWT auth `aws-sts`** (admin)\
+    trusts the hub account's issuer\
+    `sub` = Lambda role ARN, `aud` match
+  | {class: comp}
+}
+
+hub: AWS hub account {
+  class: zone
+  direction: down
+  lambda: |md
+    **Lambda `vault-secrets-sync`**\
+    every minute (EventBridge Scheduler)\
+    one run at a time
+  | {class: key}
+  config: |md
+    **SSM parameter**\
+    sync config, no secret values
+  | {class: comp}
+  sts: |md
+    **AWS STS**\
+    `GetWebIdentityToken`\
+    signed JWT, valid 5 minutes
+  | {class: comp}
+  lambda -> sts: "1 · request JWT" {class: data}
+  lambda -> config: "0 · load config" {class: data}
+}
+
+dest: AWS destination accounts {
+  class: zone
+  direction: down
+  role: |md
+    **Role `vault-secrets-sync`**\
+    trusts only the Lambda role\
+    writes only `vault/*` with `managed-by` tag\
+    cannot read secret values
+  | {class: comp}
+  sm: |md
+    **Secrets Manager**\
+    `vault/<namespace>/<mount>/<path>`\
+    value = KV data as JSON
+  | {class: comp}
+  role -> sm: "5 · create / update / delete" {class: data}
+}
+
+ci: |md
+  **Control plane: GitLab.com CI** (protected `main`, OIDC id_tokens, no stored credentials)\
+  Terragrunt manages Vault JWT auth + read policy · hub Lambda, schedule, alarms · destination roles. It never reads secret values.
+| {
+  near: bottom-center
+  shape: rectangle
+  style: {
+    fill: "#FFFFFF"
+    stroke: "#8A8A84"
+    stroke-dash: 6
+    border-radius: 8
+    font-size: 19
+  }
+}
+
+# Sync path between accounts, in run order
+vault.jwt <-> hub.lambda: "2 · JWT login ⇄ Vault token" {class: data}
+vault.kv -> hub.lambda: "3 · read secrets" {class: data}
+hub.lambda -> dest.role: "4 · AssumeRole" {class: data}
